@@ -1,0 +1,2 @@
+# ORGA Pilotage MVP uses only Python standard-library modules.
+# This file is required by Render when the build command is: pip install -r requirements.txt

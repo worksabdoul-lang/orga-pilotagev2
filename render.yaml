@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: orga-pilotage-mvp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: APP_URL
+        value: https://orga-pilotage-mvp.onrender.com

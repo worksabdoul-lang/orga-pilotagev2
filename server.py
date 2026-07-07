@@ -1222,7 +1222,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def run() -> None:
     init_db()
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
     httpd = ThreadingHTTPServer((host, port), AppHandler)
     print(f"{APP_NAME} lancé sur http://{host}:{port}")
