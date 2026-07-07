@@ -1,0 +1,126 @@
+# Brief de conception — MVP réel "ORGA Pilotage"
+### Application interne de suivi d'avancement des projets (version allégée)
+
+## 1. Nom provisoire du projet
+**ORGA Pilotage** — Application web interne de gestion et de suivi d'avancement des projets d'entreprise.
+
+## 2. Objectif du MVP réel
+
+Livrer en 2-3 semaines une application simple permettant à une petite équipe de suivre les projets : le manager crée un projet, sélectionne les membres, ils sont notifiés, et chacun renseigne son apport et le met à jour. Tout ce qui n'est pas indispensable à ce cycle de base est reporté en V1.1.
+
+**Principe : un seul cycle complet et fiable, plutôt que 13 pages partiellement finies.**
+
+## 3. Utilisateurs concernés
+
+Équipe de **6 personnes** (le coursier/chauffeur est retiré du système — son activité ne justifie pas un compte utilisateur pour l'instant) :
+
+* Gérant / Manager
+* Commercial
+* Chef de projet
+* Responsable technique et logistique
+* RAF
+* Assistante de direction
+
+## 4. Principe général de fonctionnement (inchangé)
+
+1. Le manager crée un projet.
+2. Il sélectionne les membres impliqués.
+3. Chaque membre reçoit une notification (email + interne).
+4. Chaque membre renseigne son apport, ses tâches, son avancement.
+5. Le manager suit tout dans un tableau de bord.
+
+## 5. Étapes conservées comme socle du MVP
+
+### Étape 1 — Création du projet
+Champs : nom, description courte, objectif, client/bénéficiaire (si applicable), date de début, date limite, priorité, responsable principal, membres impliqués, statut, observations.
+
+Statuts : non commencé / en cours / bloqué / terminé / livré / validé.
+
+### Étape 2 — Sélection des membres concernés
+Le manager sélectionne parmi les 5 collaborateurs (hors lui-même) ceux qui contribuent au projet.
+
+### Étape 3 — Notification automatique (un seul type conservé)
+À la création du projet uniquement :
+* notification interne dans l'application ;
+* email d'assignation.
+
+> Vous avez été ajouté au projet : [Nom du projet]. Merci de vous connecter pour renseigner votre apport.
+
+*(Les autres emails automatiques — rappel, retard, blocage, livraison — sont reportés en V1.1 ; voir section 8.)*
+
+### Étape 4 — Déclaration des apports
+Fiche "Mon apport au projet" par membre : rôle, tâches prévues, livrables attendus, délai prévu, blocages éventuels, prochaine action, niveau d'avancement, commentaire.
+
+## 6. Fonctionnalités essentielles retenues pour le MVP réel
+
+**Gardé :**
+* Connexion utilisateur (2 rôles : Manager / Collaborateur)
+* Gestion des utilisateurs (création manuelle par le manager, pas de self-service)
+* Gestion des projets (création, modification, statut)
+* Gestion des contributions par membre — **fusionnée avec les tâches** (voir note ci-dessous)
+* Notifications internes (assignation uniquement)
+* Email d'assignation (un seul type d'email)
+* Tableau de bord manager (une seule vue globale)
+
+**Reporté en V1.1 :**
+* Emails automatiques de rappel, retard, blocage, livraison (nécessitent un scheduler / cron — complexité additionnelle)
+* Export PDF/Excel
+* Vue par collaborateur *et* vue par projet séparées (le MVP n'en garde qu'une)
+* Gestion fine des tâches distincte des contributions
+
+### Note importante : fusion Contribution / Tâche
+
+Dans le brief initial, "Contribution" et "Tâche" avaient presque les mêmes champs (statut, avancement, blocage, prochaine action), avec un risque de double saisie contradictoire. Pour le MVP réel, une seule entité est conservée :
+
+**"Apport / Tâche"** — un item par membre et par projet, avec : rôle, description du travail, délai, statut, % avancement, blocage, prochaine action, commentaire, date de mise à jour.
+
+Un membre peut avoir plusieurs apports/tâches sur un même projet si besoin, mais la structure de données est unique. Cela évite l'incohérence "contribution à 40% mais tâches à 0% et 100%".
+
+## 7. Rôles dans l'application
+
+**Manager**
+Crée/modifie les projets, sélectionne les membres, assigne un responsable principal, consulte le tableau de bord, clôture ou valide un projet.
+
+**Collaborateur**
+Voit ses projets, reçoit ses notifications, renseigne et met à jour son apport, signale un blocage, marque une tâche comme terminée. Ne peut pas modifier les projets ou apports des autres.
+
+## 8. Pages du MVP réel (7 pages, contre 13 initialement)
+
+1. Page de connexion
+2. Tableau de bord (manager voit tout ; collaborateur voit ses projets)
+3. Liste des projets
+4. Création d'un projet
+5. Détail d'un projet (membres, apports, avancement global, blocages)
+6. Fiche "Mon apport au projet" (création + mise à jour)
+7. Centre de notifications
+
+*Pages retirées du MVP : gestion des utilisateurs en page dédiée (gérée en base au départ ou via une page très simple), rapport/export, vue collaborateur séparée.*
+
+## 9. Données principales (simplifiées)
+
+**Utilisateur** : ID, nom, prénom, poste, email, mot de passe, rôle, statut du compte.
+
+**Projet** : ID, nom, description, objectif, responsable principal, membres associés, date de début, date limite, priorité, statut, observations.
+
+**Apport/Tâche** : ID, projet associé, utilisateur associé, rôle dans le projet, description du travail, délai, statut, % avancement, blocage, prochaine action, commentaire, date de dernière mise à jour.
+
+**Notification** : ID, utilisateur destinataire, type, titre, message, projet associé, statut lu/non lu, date d'envoi.
+
+*(La table "Tâche" séparée disparaît du MVP — fusionnée dans Apport/Tâche.)*
+
+## 10. Technologies (inchangé)
+
+Front-end : HTML/CSS/JS ou React. Back-end : Node.js, PHP ou Python. Base de données : SQLite ou PostgreSQL (suffisant pour 6 utilisateurs). Email : Brevo ou Mailgun (un seul type d'email à gérer, très simple). Hébergement : VPS ou cloud existant de l'entreprise.
+
+## 11. Ce qui est explicitement hors MVP réel (V1.1 et au-delà)
+
+* Emails automatiques de rappel / retard / blocage / livraison (nécessite un scheduler)
+* Export PDF / Excel
+* Vue collaborateur détaillée séparée de la vue projet
+* Table Tâche distincte de Contribution
+* Rôle Coursier / chauffeur
+* Tout ce qui était déjà exclu du brief initial (IA, paie, RH, messagerie, app mobile native, etc.)
+
+## 12. Résultat attendu du MVP réel
+
+Une application où le manager crée un projet, les 5 collaborateurs concernés reçoivent une notification (email + interne), chacun renseigne et met à jour son apport, et le manager suit l'avancement global et les blocages dans un tableau de bord unique — livrable et testable en 2-3 semaines, sans dépendance à un scheduler ou à des flux d'emails multiples.
