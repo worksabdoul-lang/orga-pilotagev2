@@ -160,7 +160,11 @@ a:hover { color: var(--accent-2); text-decoration: none; }
 .nav-links > a[href="/projects"]::before { content: "P"; }
 .nav-links > a[href="/tasks"]::before { content: "T"; }
 .nav-links > a[href="/tasks/new"]::before { content: "+"; }
+.nav-links > a[href="/documents"]::before { content: "D"; }
+.nav-links > a[href="/field-reports"]::before { content: "R"; }
 .nav-links > a[href="/reports"]::before { content: "B"; }
+.nav-links > a[href="/chat"]::before { content: "C"; }
+.nav-links > a[href="/backups"]::before { content: "Z"; }
 .nav-links > a[href="/notifications"]::before { content: "N"; }
 .nav-links > a[href="/users"]::before { content: "U"; }
 .link-button::before { content: "S"; }

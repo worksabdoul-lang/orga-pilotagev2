@@ -13,14 +13,21 @@ import datetime as dt
 import hashlib
 import hmac
 import html
+import json
+import mimetypes
 import os
 import re
 import secrets
+import shutil
 import smtplib
 import sqlite3
 import ssl
+import uuid
+import zipfile
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,8 +39,13 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "orga_pilotage.sqlite3"
 STATIC_DIR = BASE_DIR / "static"
+UPLOAD_DIR = DATA_DIR / "uploads"
+BACKUP_DIR = DATA_DIR / "backups"
 SESSION_COOKIE = "orga_session"
 PBKDF2_ITERATIONS = 180_000
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
+ALLOWED_UPLOAD_MIME_PREFIXES = ("application/pdf", "image/jpeg", "image/png")
 
 PROJECT_STATUSES = [
     ("non_commence", "Non commencé"),
@@ -59,6 +71,23 @@ REPORT_STATUSES = [
     ("lu", "Lu par le gerant"),
     ("a_completer", "A completer"),
 ]
+DOCUMENT_STATUSES = [
+    ("en_attente", "En attente"),
+    ("valide", "Valide"),
+    ("archive", "Archive"),
+    ("remplace", "Remplace"),
+]
+DOCUMENT_TYPES = [
+    ("justificatif", "Justificatif"),
+    ("devis", "Devis"),
+    ("facture", "Facture"),
+    ("contrat", "Contrat"),
+    ("rapport", "Rapport"),
+    ("photo", "Photo"),
+    ("preuve", "Preuve"),
+    ("autre", "Autre"),
+]
+FIELD_REPORT_STATUSES = [("brouillon", "Brouillon"), ("envoye", "Envoye"), ("lu", "Lu")]
 
 DOMAIN_TASK_SEEDS = {
     "evenementiel": {
@@ -174,12 +203,21 @@ def status_class(value: str) -> str:
         "basse": "muted",
         "normale": "info",
         "urgente": "danger",
+        "en_attente": "warning",
+        "archive": "muted",
+        "remplace": "muted",
+        "brouillon": "muted",
+        "envoye": "info",
+        "lu": "success",
+        "a_completer": "warning",
     }
     return mapping.get(value, "muted")
 
 
 def get_db() -> sqlite3.Connection:
     DATA_DIR.mkdir(exist_ok=True)
+    UPLOAD_DIR.mkdir(exist_ok=True)
+    BACKUP_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -393,6 +431,67 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS field_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'brouillon',
+                submitted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                stored_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                document_type TEXT NOT NULL DEFAULT 'justificatif',
+                status TEXT NOT NULL DEFAULT 'en_attente',
+                project_id INTEGER,
+                task_id INTEGER,
+                weekly_report_id INTEGER,
+                report_id INTEGER,
+                uploaded_by INTEGER NOT NULL,
+                comment TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+                FOREIGN KEY(task_id) REFERENCES project_tasks(id) ON DELETE SET NULL,
+                FOREIGN KEY(weekly_report_id) REFERENCES weekly_reports(id) ON DELETE SET NULL,
+                FOREIGN KEY(report_id) REFERENCES field_reports(id) ON DELETE SET NULL,
+                FOREIGN KEY(uploaded_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS backups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backup_name TEXT NOT NULL,
+                backup_path TEXT NOT NULL,
+                backup_type TEXT NOT NULL DEFAULT 'manuelle',
+                file_size INTEGER NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_by INTEGER,
+                deleted_at TEXT,
+                FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(deleted_by) REFERENCES users(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -616,6 +715,86 @@ def generate_project_tasks(db: sqlite3.Connection, project_id: int, domain_id: i
     return generated
 
 
+def safe_filename(name: str) -> str:
+    stem = Path(name or "document").stem
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", stem).strip(".-") or "document"
+    return stem[:80]
+
+
+def validate_upload(filename: str, content_type: str, data: bytes) -> Tuple[bool, str]:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in ALLOWED_UPLOAD_EXTENSIONS:
+        return False, "Format refuse. Formats autorises : PDF, JPG, JPEG, PNG."
+    if len(data) > MAX_UPLOAD_SIZE:
+        return False, "Fichier trop volumineux. Taille maximale : 5 Mo."
+    detected = (content_type or mimetypes.guess_type(filename or "")[0] or "").lower()
+    if detected and not any(detected.startswith(prefix) for prefix in ALLOWED_UPLOAD_MIME_PREFIXES):
+        return False, "Type de fichier refuse."
+    signatures = {
+        ".pdf": data.startswith(b"%PDF"),
+        ".png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        ".jpg": data.startswith(b"\xff\xd8\xff"),
+        ".jpeg": data.startswith(b"\xff\xd8\xff"),
+    }
+    if data and not signatures.get(suffix, False):
+        return False, "Le contenu du fichier ne correspond pas a son extension."
+    return True, ""
+
+
+def store_document_file(
+    db: sqlite3.Connection,
+    *,
+    file_info: Dict[str, Any],
+    user_id: int,
+    title: str,
+    document_type: str = "justificatif",
+    project_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    weekly_report_id: Optional[int] = None,
+    report_id: Optional[int] = None,
+    comment: str = "",
+) -> Optional[int]:
+    original_name = file_info.get("filename") or ""
+    data = file_info.get("data") or b""
+    if not original_name or not data:
+        return None
+    ok, error = validate_upload(original_name, file_info.get("content_type", ""), data)
+    if not ok:
+        raise ValueError(error)
+    suffix = Path(original_name).suffix.lower()
+    stored_name = f"{dt.datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex}{suffix}"
+    target_dir = UPLOAD_DIR / dt.datetime.now().strftime("%Y/%m")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / stored_name
+    target.write_bytes(data)
+    rel_path = str(target.relative_to(DATA_DIR)).replace("\\", "/")
+    file_type = suffix.lstrip(".").upper()
+    cur = db.execute(
+        """
+        INSERT INTO documents(title,original_name,stored_name,file_path,file_type,file_size,document_type,status,project_id,task_id,weekly_report_id,report_id,uploaded_by,comment,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            title or safe_filename(original_name),
+            original_name,
+            stored_name,
+            rel_path,
+            file_type,
+            len(data),
+            document_type if document_type in dict(DOCUMENT_TYPES) else "autre",
+            "en_attente",
+            project_id,
+            task_id,
+            weekly_report_id,
+            report_id,
+            user_id,
+            comment,
+            now_iso(),
+        ),
+    )
+    return cur.lastrowid
+
+
 def create_session(user_id: int) -> str:
     token = secrets.token_urlsafe(32)
     with get_db() as db:
@@ -689,6 +868,36 @@ class AppHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         return parse_qs(raw, keep_blank_values=True)
 
+    def read_multipart_form(self) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > (MAX_UPLOAD_SIZE * 8):
+            raise ValueError("Envoi trop volumineux.")
+        body = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            return parse_qs(body.decode("utf-8"), keep_blank_values=True), []
+        raw = b"Content-Type: " + content_type.encode("utf-8") + b"\r\nMIME-Version: 1.0\r\n\r\n" + body
+        message = BytesParser(policy=email_policy).parsebytes(raw)
+        fields: Dict[str, List[str]] = {}
+        files: List[Dict[str, Any]] = []
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                if payload:
+                    files.append(
+                        {
+                            "field": name or "files",
+                            "filename": filename,
+                            "content_type": part.get_content_type(),
+                            "data": payload,
+                        }
+                    )
+            elif name:
+                fields.setdefault(name, []).append(payload.decode(part.get_content_charset() or "utf-8", errors="replace").strip())
+        return fields, files
+
     def form_value(self, form: Dict[str, List[str]], key: str, default: str = "") -> str:
         return form.get(key, [default])[0].strip()
 
@@ -724,8 +933,12 @@ class AppHandler(BaseHTTPRequestHandler):
             ("/projects", "Portefeuille projets", "Ouvrez un projet pour voir son domaine, son equipe et ses taches."),
             ("/tasks/new", "Tache manuelle", "Ajoutez ici une tache ponctuelle qui n'existe pas dans les modeles."),
             ("/tasks", "To-do list", "Mettez vos taches a jour et ajoutez un suivi si besoin."),
+            ("/documents", "Gestion documentaire", "Retrouvez les justificatifs, contrats, factures et preuves classes par projet."),
+            ("/field-reports", "Rapports", "Redigez un compte rendu simple avec pieces justificatives rattachees au projet."),
             ("/reports/new", "Bilan hebdomadaire", "Resumez la semaine : realisations, blocages et priorites suivantes."),
             ("/reports", "Bilans", "Consultez ou envoyez les bilans hebdomadaires selon votre role."),
+            ("/chat", "Chat equipe", "Echangez rapidement dans le groupe general ; classez les documents importants dans les projets."),
+            ("/backups", "Sauvegarde", "Telechargez une archive complete de la base et des fichiers televerses."),
             ("/notifications", "Notifications", "Retrouvez les assignations, demandes de suivi et bilans envoyes."),
             ("/users", "Equipe", "Ajoutez ou verifiez les comptes actifs de l'application."),
         ]
@@ -754,9 +967,13 @@ class AppHandler(BaseHTTPRequestHandler):
               <div class="nav-links">
                 <a href="/dashboard">Tableau de bord</a>
                 <a href="/projects">Projets</a>
-                <a href="/tasks">Mes tÃ¢ches</a>
-                { '<a href="/tasks/new">Nouvelle tÃ¢che</a>' if user.is_manager else '' }
+                <a href="/tasks">Mes taches</a>
+                { '<a href="/tasks/new">Nouvelle tache</a>' if user.is_manager else '' }
+                <a href="/documents">Documents</a>
+                <a href="/field-reports">Rapports</a>
                 <a href="/reports">Bilans</a>
+                <a href="/chat">Chat</a>
+                { '<a href="/backups">Sauvegarde</a>' if user.is_manager else '' }
                 <a href="/notifications">Notifications {f'<span class="pill danger">{unread}</span>' if unread else ''}</a>
                 { '<a href="/users">Utilisateurs</a>' if user.is_manager else '' }
                 <form method="post" action="/logout" class="inline-form"><button class="link-button" type="submit">Déconnexion</button></form>
@@ -815,10 +1032,22 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.page_tasks()
         if path == "/tasks/new":
             return self.page_task_new()
+        if path == "/documents":
+            return self.page_documents()
+        if path == "/documents/new":
+            return self.page_document_new()
+        if path == "/field-reports":
+            return self.page_field_reports()
+        if path == "/field-reports/new":
+            return self.page_field_report_form()
         if path == "/reports":
             return self.page_reports()
         if path == "/reports/new":
             return self.page_report_form(None)
+        if path == "/chat":
+            return self.page_chat()
+        if path == "/backups":
+            return self.page_backups()
         if path == "/notifications":
             return self.page_notifications()
         if path == "/users":
@@ -835,6 +1064,15 @@ class AppHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/tasks/(\d+)", path)
         if match:
             return self.page_task_detail(int(match.group(1)))
+        match = re.fullmatch(r"/documents/(\d+)/(download|view)", path)
+        if match:
+            return self.serve_document(int(match.group(1)), inline=match.group(2) == "view")
+        match = re.fullmatch(r"/field-reports/(\d+)", path)
+        if match:
+            return self.page_field_report_detail(int(match.group(1)))
+        match = re.fullmatch(r"/backups/(\d+)/download", path)
+        if match:
+            return self.serve_backup(int(match.group(1)))
         match = re.fullmatch(r"/reports/(\d+)", path)
         if match:
             return self.page_report_detail(int(match.group(1)))
@@ -852,8 +1090,16 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.action_user_new()
         if path == "/tasks/new":
             return self.action_task_new()
+        if path == "/documents/new":
+            return self.action_document_new()
+        if path == "/field-reports/new":
+            return self.action_field_report_new()
         if path == "/reports/new":
             return self.action_report_save(None)
+        if path == "/chat":
+            return self.action_chat_send()
+        if path == "/backups/new":
+            return self.action_backup_new()
         match = re.fullmatch(r"/projects/(\d+)/status", path)
         if match:
             return self.action_project_status(int(match.group(1)))
@@ -863,6 +1109,12 @@ class AppHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/tasks/(\d+)/comment", path)
         if match:
             return self.action_task_comment(int(match.group(1)))
+        match = re.fullmatch(r"/documents/(\d+)/status", path)
+        if match:
+            return self.action_document_status(int(match.group(1)))
+        match = re.fullmatch(r"/chat/(\d+)/delete", path)
+        if match:
+            return self.action_chat_delete(int(match.group(1)))
         match = re.fullmatch(r"/reports/(\d+)/manager", path)
         if match:
             return self.action_report_manager(int(match.group(1)))
@@ -1347,6 +1599,8 @@ class AppHandler(BaseHTTPRequestHandler):
         missing_html = "".join(f"<li>{esc(m['first_name'])} {esc(m['last_name'])} - {esc(m['poste'])}</li>" for m in missing_members) or "<li>Tous les membres ont au moins une tache.</li>"
         task_rows = "".join(self.task_row(t, show_project=False) for t in tasks) or "<tr><td colspan='6'>Aucune tache generee pour ce projet.</td></tr>"
         item_rows = "".join(self.work_item_row(i, show_project=False) for i in items) or "<tr><td colspan='5'>Aucun ancien apport libre.</td></tr>"
+        project_docs = [d for d in self.visible_documents(user) if d["project_id"] == project_id]
+        doc_rows = self.documents_table(project_docs, user)
         status_form = ""
         if user.is_manager:
             status_form = f"""
@@ -1396,6 +1650,10 @@ class AppHandler(BaseHTTPRequestHandler):
         <section class="card">
           <div class="section-head"><h2>Taches du projet</h2>{task_action}</div>
           <div class="table-wrap"><table><thead><tr><th>Tache</th><th>Assigne</th><th>Priorite</th><th>Date limite</th><th>Statut</th><th>Avancement</th></tr></thead><tbody>{task_rows}</tbody></table></div>
+        </section>
+        <section class="card">
+          <div class="section-head"><h2>Documents du projet</h2><a href="/documents/new">Ajouter un document</a></div>
+          <div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Projet</th><th>Ajoute par</th><th>Date</th><th>Statut</th><th>Actions</th></tr></thead><tbody>{doc_rows}</tbody></table></div>
         </section>
         <section class="card">
           <div class="section-head"><h2>Anciens apports libres</h2><a href="/projects/{project_id}/work-items/new">Ajouter un apport libre</a></div>
@@ -1614,10 +1872,11 @@ class AppHandler(BaseHTTPRequestHandler):
         </div>
         <section class="card">
           <h2>Ajouter un commentaire de suivi</h2>
-          <form method="post" action="/tasks/{task_id}/comment" class="form grid-form">
+          <form method="post" action="/tasks/{task_id}/comment" enctype="multipart/form-data" class="form grid-form">
             <label class="full">Ce qui a ete fait / information a remonter<textarea name="comment" rows="3" required></textarea></label>
             <label>Blocage eventuel<textarea name="blocker" rows="3"></textarea></label>
             <label>Prochaine action<textarea name="next_action" rows="3"></textarea></label>
+            <label class="full">Piece justificative<input type="file" name="files" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple></label>
             <div class="full actions"><button class="btn primary" type="submit">Ajouter le suivi</button></div>
           </form>
         </section>
@@ -1665,15 +1924,29 @@ class AppHandler(BaseHTTPRequestHandler):
         task = tasks[0]
         if not self.user_can_access_task(user, task):
             return self.render_error(403, "Vous ne pouvez pas commenter cette tache.")
-        form = self.read_form()
-        with get_db() as db:
-            db.execute(
-                "INSERT INTO task_comments(task_id,user_id,comment,blocker,next_action,created_at) VALUES(?,?,?,?,?,?)",
-                (task_id, user.id, self.form_value(form, "comment"), self.form_value(form, "blocker"), self.form_value(form, "next_action"), now_iso()),
-            )
-            if self.form_value(form, "blocker"):
-                db.execute("UPDATE project_tasks SET status='bloque', updated_at=? WHERE id=?", (now_iso(), task_id))
-            db.commit()
+        try:
+            form, files = self.read_multipart_form()
+            with get_db() as db:
+                cur = db.execute(
+                    "INSERT INTO task_comments(task_id,user_id,comment,blocker,next_action,created_at) VALUES(?,?,?,?,?,?)",
+                    (task_id, user.id, self.form_value(form, "comment"), self.form_value(form, "blocker"), self.form_value(form, "next_action"), now_iso()),
+                )
+                for f in files:
+                    store_document_file(
+                        db,
+                        file_info=f,
+                        user_id=user.id,
+                        title=f"Justificatif - {task['title']}",
+                        document_type="justificatif",
+                        project_id=task["project_id"],
+                        task_id=task_id,
+                        comment=f"Piece jointe au commentaire #{cur.lastrowid}",
+                    )
+                if self.form_value(form, "blocker"):
+                    db.execute("UPDATE project_tasks SET status='bloque', updated_at=? WHERE id=?", (now_iso(), task_id))
+                db.commit()
+        except ValueError as exc:
+            return self.render_error(400, esc(exc))
         self.redirect(f"/tasks/{task_id}")
 
     def page_task_new(self) -> None:
@@ -1738,6 +2011,314 @@ class AppHandler(BaseHTTPRequestHandler):
         send_task_email(assigned["email"], f"{assigned['first_name']} {assigned['last_name']}", project["name"], project_id, title, self.form_value(form, "deadline"))
         self.redirect(f"/tasks/{task_id}")
 
+    def document_query(self) -> List[sqlite3.Row]:
+        return query_all(
+            """
+            SELECT d.*, p.name AS project_name, p.client AS project_client,
+                   u.first_name || ' ' || u.last_name AS uploader_name,
+                   t.title AS task_title, wr.week_label AS weekly_label, fr.title AS report_title
+            FROM documents d
+            LEFT JOIN projects p ON p.id=d.project_id
+            LEFT JOIN users u ON u.id=d.uploaded_by
+            LEFT JOIN project_tasks t ON t.id=d.task_id
+            LEFT JOIN weekly_reports wr ON wr.id=d.weekly_report_id
+            LEFT JOIN field_reports fr ON fr.id=d.report_id
+            ORDER BY d.created_at DESC
+            """
+        )
+
+    def user_can_access_document(self, user: CurrentUser, doc: sqlite3.Row) -> bool:
+        if user.is_manager or doc["uploaded_by"] == user.id:
+            return True
+        if doc["project_id"] and self.user_can_access_project(user, doc["project_id"]):
+            return True
+        if doc["task_id"]:
+            row = query_one("SELECT 1 FROM project_tasks WHERE id=? AND assigned_user_id=?", (doc["task_id"], user.id))
+            if row:
+                return True
+        if doc["weekly_report_id"]:
+            row = query_one("SELECT 1 FROM weekly_reports WHERE id=? AND user_id=?", (doc["weekly_report_id"], user.id))
+            if row:
+                return True
+        if doc["report_id"]:
+            row = query_one("SELECT 1 FROM field_reports WHERE id=? AND user_id=?", (doc["report_id"], user.id))
+            if row:
+                return True
+        return False
+
+    def visible_documents(self, user: CurrentUser) -> List[sqlite3.Row]:
+        docs = self.document_query()
+        return [d for d in docs if self.user_can_access_document(user, d)]
+
+    def documents_table(self, docs: List[sqlite3.Row], user: CurrentUser) -> str:
+        rows = []
+        for d in docs:
+            manager_actions = ""
+            if user.is_manager:
+                manager_actions = f"""
+                <form method="post" action="/documents/{d['id']}/status" class="inline-form">
+                  <input type="hidden" name="status" value="valide"><button class="link-button" type="submit">Valider</button>
+                </form>
+                <form method="post" action="/documents/{d['id']}/status" class="inline-form">
+                  <input type="hidden" name="status" value="archive"><button class="link-button" type="submit">Archiver</button>
+                </form>
+                """
+            rows.append(
+                f"""
+                <tr>
+                  <td><a class="strong" href="/documents/{d['id']}/view">{esc(d['title'])}</a><br><small>{esc(d['original_name'])}</small></td>
+                  <td>{esc(dict(DOCUMENT_TYPES).get(d['document_type'], d['document_type']))}<br><small>{esc(d['file_type'])} - {round((d['file_size'] or 0)/1024, 1)} Ko</small></td>
+                  <td>{esc(d['project_name'] or 'Entreprise')}</td>
+                  <td>{esc(d['uploader_name'] or '')}</td>
+                  <td>{esc(d['created_at'])}</td>
+                  <td><span class="pill {status_class(d['status'])}">{esc(status_label(d['status'], DOCUMENT_STATUSES))}</span></td>
+                  <td><a href="/documents/{d['id']}/view">Ouvrir</a> | <a href="/documents/{d['id']}/download">Telecharger</a>{manager_actions}</td>
+                </tr>
+                """
+            )
+        return "".join(rows) or "<tr><td colspan='7'>Aucun document.</td></tr>"
+
+    def page_documents(self) -> None:
+        user = self.require_user()
+        docs = self.visible_documents(user)
+        query = parse_qs(self.parsed_path.query)
+        q = (query.get("q", [""])[0] or "").lower()
+        project_filter = query.get("project_id", [""])[0]
+        type_filter = query.get("document_type", [""])[0]
+        if q:
+            docs = [d for d in docs if q in (d["title"] or "").lower() or q in (d["original_name"] or "").lower() or q in (d["project_name"] or "").lower()]
+        if project_filter.isdigit():
+            docs = [d for d in docs if str(d["project_id"] or "") == project_filter]
+        if type_filter:
+            docs = [d for d in docs if d["document_type"] == type_filter]
+        projects = query_all("SELECT id,name FROM projects ORDER BY updated_at DESC") if user.is_manager else query_all(
+            "SELECT p.id,p.name FROM projects p JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=? ORDER BY p.updated_at DESC",
+            (user.id,),
+        )
+        project_options = "<option value=''>Tous les projets</option>" + "".join(f"<option value='{p['id']}' {'selected' if str(p['id']) == project_filter else ''}>{esc(p['name'])}</option>" for p in projects)
+        type_options = "<option value=''>Tous les types</option>" + options_html(DOCUMENT_TYPES, type_filter)
+        rows = self.documents_table(docs, user)
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Preuves et fichiers</p><h1>Gestion documentaire</h1><p>Centralisez les justificatifs, contrats, factures, photos et rapports lies aux projets.</p></div><a class="btn primary" href="/documents/new">Ajouter un document</a></header>
+        <section class="card">
+          <form method="get" action="/documents" class="form grid-form">
+            <label>Recherche<input name="q" value="{esc(q)}" placeholder="Nom, fichier ou projet"></label>
+            <label>Projet<select name="project_id">{project_options}</select></label>
+            <label>Type<select name="document_type">{type_options}</select></label>
+            <div class="actions"><button class="btn primary" type="submit">Filtrer</button><a class="btn ghost" href="/documents">Reinitialiser</a></div>
+          </form>
+        </section>
+        <section class="card">
+          <div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Projet</th><th>Ajoute par</th><th>Date</th><th>Statut</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table></div>
+        </section>
+        """
+        self.render("Gestion documentaire", content, user)
+
+    def page_document_new(self) -> None:
+        user = self.require_user()
+        projects = query_all("SELECT id,name FROM projects ORDER BY updated_at DESC") if user.is_manager else query_all(
+            "SELECT p.id,p.name FROM projects p JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=? ORDER BY p.updated_at DESC",
+            (user.id,),
+        )
+        project_options = "<option value=''>Entreprise / non lie</option>" + "".join(f"<option value='{p['id']}'>{esc(p['name'])}</option>" for p in projects)
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Document</p><h1>Ajouter un document</h1><p>Formats autorises : PDF, JPG, JPEG, PNG. Taille maximale : 5 Mo par fichier.</p></div></header>
+        <section class="card form-card">
+          <form method="post" action="/documents/new" enctype="multipart/form-data" class="form grid-form">
+            <label>Titre du document<input name="title" required></label>
+            <label>Type<select name="document_type">{options_html(DOCUMENT_TYPES, 'justificatif')}</select></label>
+            <label class="full">Projet associe<select name="project_id">{project_options}</select></label>
+            <label class="full">Commentaire<textarea name="comment" rows="3"></textarea></label>
+            <label class="full">Fichier<input type="file" name="files" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></label>
+            <div class="full actions"><a class="btn ghost" href="/documents">Annuler</a><button class="btn primary" type="submit">Enregistrer</button></div>
+          </form>
+        </section>
+        """
+        self.render("Ajouter un document", content, user)
+
+    def action_document_new(self) -> None:
+        user = self.require_user()
+        try:
+            form, files = self.read_multipart_form()
+            project_id_raw = self.form_value(form, "project_id")
+            project_id = int(project_id_raw) if project_id_raw.isdigit() else None
+            if project_id and not self.user_can_access_project(user, project_id):
+                return self.render_error(403, "Vous ne pouvez pas ajouter de document sur ce projet.")
+            with get_db() as db:
+                for f in files:
+                    store_document_file(
+                        db,
+                        file_info=f,
+                        user_id=user.id,
+                        title=self.form_value(form, "title") or safe_filename(f["filename"]),
+                        document_type=self.form_value(form, "document_type", "justificatif"),
+                        project_id=project_id,
+                        comment=self.form_value(form, "comment"),
+                    )
+                if user.is_manager is False:
+                    managers = db.execute("SELECT id FROM users WHERE role='manager' AND is_active=1").fetchall()
+                    for manager in managers:
+                        create_notification(db, manager["id"], "Nouveau document ajoute", f"{user.full_name} a ajoute un document.", project_id, "document")
+                db.commit()
+        except ValueError as exc:
+            return self.render_error(400, esc(exc))
+        self.redirect("/documents")
+
+    def action_document_status(self, document_id: int) -> None:
+        user = self.require_user()
+        if not user.is_manager:
+            return self.render_error(403, "Acces reserve au manager.")
+        form = self.read_form()
+        status = self.form_value(form, "status")
+        if status not in dict(DOCUMENT_STATUSES):
+            return self.render_error(400, "Statut documentaire invalide.")
+        with get_db() as db:
+            db.execute("UPDATE documents SET status=? WHERE id=?", (status, document_id))
+            db.commit()
+        self.redirect("/documents")
+
+    def serve_document(self, document_id: int, inline: bool = False) -> None:
+        user = self.require_user()
+        doc = query_one("SELECT * FROM documents WHERE id=?", (document_id,))
+        if not doc:
+            return self.render_error(404, "Document introuvable.")
+        if not self.user_can_access_document(user, doc):
+            return self.render_error(403, "Acces refuse a ce document.")
+        target = (DATA_DIR / doc["file_path"]).resolve()
+        if not str(target).startswith(str(DATA_DIR.resolve())) or not target.exists():
+            return self.render_error(404, "Fichier introuvable.")
+        data = target.read_bytes()
+        content_type = mimetypes.guess_type(doc["original_name"])[0] or "application/octet-stream"
+        disposition = "inline" if inline else "attachment"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'{disposition}; filename="{safe_filename(doc["original_name"])}{Path(doc["original_name"]).suffix}"')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def page_field_reports(self) -> None:
+        user = self.require_user()
+        if user.is_manager:
+            reports = query_all(
+                """
+                SELECT r.*, p.name AS project_name, u.first_name || ' ' || u.last_name AS user_name
+                FROM field_reports r
+                LEFT JOIN projects p ON p.id=r.project_id
+                JOIN users u ON u.id=r.user_id
+                ORDER BY COALESCE(r.submitted_at, r.updated_at) DESC
+                """
+            )
+        else:
+            reports = query_all(
+                """
+                SELECT r.*, p.name AS project_name, u.first_name || ' ' || u.last_name AS user_name
+                FROM field_reports r
+                LEFT JOIN projects p ON p.id=r.project_id
+                JOIN users u ON u.id=r.user_id
+                WHERE r.user_id=? OR r.project_id IN (SELECT project_id FROM project_members WHERE user_id=?)
+                ORDER BY COALESCE(r.submitted_at, r.updated_at) DESC
+                """,
+                (user.id, user.id),
+            )
+        rows = "".join(
+            f"<tr><td><a class='strong' href='/field-reports/{r['id']}'>{esc(r['title'])}</a></td><td>{esc(r['project_name'] or 'Non lie')}</td><td>{esc(r['user_name'])}</td><td><span class='pill {status_class(r['status'])}'>{esc(status_label(r['status'], FIELD_REPORT_STATUSES))}</span></td><td>{esc(r['submitted_at'] or r['created_at'])}</td></tr>"
+            for r in reports
+        ) or "<tr><td colspan='5'>Aucun rapport.</td></tr>"
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Comptes rendus</p><h1>Rapports</h1><p>Visites terrain, livraisons, reunions, controles et retours clients avec justificatifs.</p></div><a class="btn primary" href="/field-reports/new">Nouveau rapport</a></header>
+        <section class="card"><div class="table-wrap"><table><thead><tr><th>Titre</th><th>Projet</th><th>Auteur</th><th>Statut</th><th>Date</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+        """
+        self.render("Rapports", content, user)
+
+    def page_field_report_form(self) -> None:
+        user = self.require_user()
+        projects = query_all("SELECT id,name FROM projects ORDER BY updated_at DESC") if user.is_manager else query_all(
+            "SELECT p.id,p.name FROM projects p JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=? ORDER BY p.updated_at DESC",
+            (user.id,),
+        )
+        project_options = "<option value=''>Non lie</option>" + "".join(f"<option value='{p['id']}'>{esc(p['name'])}</option>" for p in projects)
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Rapport</p><h1>Nouveau rapport</h1><p>Gardez le compte rendu court et rattachez les preuves utiles.</p></div></header>
+        <section class="card form-card">
+          <form method="post" action="/field-reports/new" enctype="multipart/form-data" class="form grid-form">
+            <label>Titre<input name="title" required></label>
+            <label>Projet<select name="project_id">{project_options}</select></label>
+            <label>Statut<select name="status">{options_html(FIELD_REPORT_STATUSES, 'envoye')}</select></label>
+            <label class="full">Compte rendu<textarea name="content" rows="6" required></textarea></label>
+            <label class="full">Pieces jointes<input type="file" name="files" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple></label>
+            <div class="full actions"><a class="btn ghost" href="/field-reports">Annuler</a><button class="btn primary" type="submit">Enregistrer</button></div>
+          </form>
+        </section>
+        """
+        self.render("Nouveau rapport", content, user)
+
+    def action_field_report_new(self) -> None:
+        user = self.require_user()
+        try:
+            form, files = self.read_multipart_form()
+            project_raw = self.form_value(form, "project_id")
+            project_id = int(project_raw) if project_raw.isdigit() else None
+            if project_id and not self.user_can_access_project(user, project_id):
+                return self.render_error(403, "Vous ne pouvez pas creer de rapport sur ce projet.")
+            status = self.form_value(form, "status", "envoye")
+            if status not in dict(FIELD_REPORT_STATUSES):
+                return self.render_error(400, "Statut de rapport invalide.")
+            submitted_at = now_iso() if status == "envoye" else None
+            with get_db() as db:
+                cur = db.execute(
+                    """
+                    INSERT INTO field_reports(project_id,user_id,title,content,status,submitted_at,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (project_id, user.id, self.form_value(form, "title"), self.form_value(form, "content"), status, submitted_at, now_iso(), now_iso()),
+                )
+                report_id = cur.lastrowid
+                for f in files:
+                    store_document_file(
+                        db,
+                        file_info=f,
+                        user_id=user.id,
+                        title=f"Piece rapport - {self.form_value(form, 'title')}",
+                        document_type="rapport",
+                        project_id=project_id,
+                        report_id=report_id,
+                        comment="Piece jointe au rapport",
+                    )
+                if status == "envoye":
+                    managers = db.execute("SELECT id FROM users WHERE role='manager' AND is_active=1").fetchall()
+                    for manager in managers:
+                        create_notification(db, manager["id"], "Rapport envoye", f"{user.full_name} a envoye le rapport : {self.form_value(form, 'title')}.", project_id, "rapport")
+                db.commit()
+        except ValueError as exc:
+            return self.render_error(400, esc(exc))
+        self.redirect(f"/field-reports/{report_id}")
+
+    def page_field_report_detail(self, report_id: int) -> None:
+        user = self.require_user()
+        report = query_one(
+            """
+            SELECT r.*, p.name AS project_name, u.first_name || ' ' || u.last_name AS user_name
+            FROM field_reports r
+            LEFT JOIN projects p ON p.id=r.project_id
+            JOIN users u ON u.id=r.user_id
+            WHERE r.id=?
+            """,
+            (report_id,),
+        )
+        if not report:
+            return self.render_error(404, "Rapport introuvable.")
+        if not user.is_manager and report["user_id"] != user.id and not (report["project_id"] and self.user_can_access_project(user, report["project_id"])):
+            return self.render_error(403, "Acces refuse a ce rapport.")
+        docs = [d for d in self.visible_documents(user) if d["report_id"] == report_id]
+        doc_rows = self.documents_table(docs, user)
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">{esc(report['project_name'] or 'Rapport')}</p><h1>{esc(report['title'])}</h1><p>{esc(report['user_name'])} - {esc(report['submitted_at'] or report['created_at'])}</p></div></header>
+        <section class="card"><h2>Compte rendu</h2><p>{esc(report['content'])}</p><p><span class="pill {status_class(report['status'])}">{esc(status_label(report['status'], FIELD_REPORT_STATUSES))}</span></p></section>
+        <section class="card"><h2>Pieces jointes</h2><div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Projet</th><th>Ajoute par</th><th>Date</th><th>Statut</th><th>Actions</th></tr></thead><tbody>{doc_rows}</tbody></table></div></section>
+        """
+        self.render(report["title"], content, user)
+
     def page_reports(self) -> None:
         user = self.require_user()
         if user.is_manager:
@@ -1774,7 +2355,7 @@ class AppHandler(BaseHTTPRequestHandler):
         content = f"""
         <header class="hero small"><div><p class="eyebrow">Bilan hebdomadaire</p><h1>{title}</h1><p>Resumez les projets suivis, les taches terminees, les blocages et les priorites de la semaine prochaine.</p></div></header>
         <section class="card form-card">
-          <form method="post" action="/reports/new" class="form grid-form">
+          <form method="post" action="/reports/new" enctype="multipart/form-data" class="form grid-form">
             <label>Semaine concernee<input name="week_label" required placeholder="Ex : 12-17 aout"></label>
             <label>Date debut<input type="date" name="week_start"></label>
             <label>Date fin<input type="date" name="week_end"></label>
@@ -1785,6 +2366,7 @@ class AppHandler(BaseHTTPRequestHandler):
             <label class="full">Difficultes ou blocages<textarea name="blockers" rows="3"></textarea></label>
             <label class="full">Besoins d'aide ou de validation<textarea name="support_needed" rows="3"></textarea></label>
             <label class="full">Priorites de la semaine prochaine<textarea name="next_week_priorities" rows="3"></textarea></label>
+            <label class="full">Pieces justificatives<input type="file" name="files" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple></label>
             <label class="full">Commentaire general<textarea name="general_comment" rows="3"></textarea></label>
             <div class="full actions"><a class="btn ghost" href="/reports">Annuler</a><button class="btn primary" type="submit">Enregistrer le bilan</button></div>
           </form>
@@ -1796,49 +2378,65 @@ class AppHandler(BaseHTTPRequestHandler):
         user = self.require_user()
         if user.is_manager:
             return self.render_error(403, "Le manager consulte les bilans mais ne les cree pas.")
-        form = self.read_form()
+        try:
+            form, files = self.read_multipart_form()
+        except ValueError as exc:
+            return self.render_error(400, esc(exc))
         status = self.form_value(form, "status", "envoye")
         if status not in dict(REPORT_STATUSES):
             return self.render_error(400, "Statut de bilan invalide.")
         submitted_at = now_iso() if status == "envoye" else None
-        with get_db() as db:
-            cur = db.execute(
-                """
-                INSERT INTO weekly_reports(user_id,week_label,week_start,week_end,projects_followed,tasks_done,tasks_pending,blockers,support_needed,next_week_priorities,general_comment,status,submitted_at,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    user.id,
-                    self.form_value(form, "week_label"),
-                    self.form_value(form, "week_start"),
-                    self.form_value(form, "week_end"),
-                    self.form_value(form, "projects_followed"),
-                    self.form_value(form, "tasks_done"),
-                    self.form_value(form, "tasks_pending"),
-                    self.form_value(form, "blockers"),
-                    self.form_value(form, "support_needed"),
-                    self.form_value(form, "next_week_priorities"),
-                    self.form_value(form, "general_comment"),
-                    status,
-                    submitted_at,
-                    now_iso(),
-                    now_iso(),
-                ),
-            )
-            report_id = cur.lastrowid
-            managers = db.execute("SELECT * FROM users WHERE role='manager' AND is_active=1").fetchall()
-            for manager in managers:
-                create_notification(
-                    db,
-                    manager["id"],
-                    "Bilan hebdomadaire envoye",
-                    f"{user.full_name} a envoye le bilan : {self.form_value(form, 'week_label')}.",
-                    None,
-                    "bilan",
-                    None,
-                    report_id,
+        try:
+            with get_db() as db:
+                cur = db.execute(
+                    """
+                    INSERT INTO weekly_reports(user_id,week_label,week_start,week_end,projects_followed,tasks_done,tasks_pending,blockers,support_needed,next_week_priorities,general_comment,status,submitted_at,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        user.id,
+                        self.form_value(form, "week_label"),
+                        self.form_value(form, "week_start"),
+                        self.form_value(form, "week_end"),
+                        self.form_value(form, "projects_followed"),
+                        self.form_value(form, "tasks_done"),
+                        self.form_value(form, "tasks_pending"),
+                        self.form_value(form, "blockers"),
+                        self.form_value(form, "support_needed"),
+                        self.form_value(form, "next_week_priorities"),
+                        self.form_value(form, "general_comment"),
+                        status,
+                        submitted_at,
+                        now_iso(),
+                        now_iso(),
+                    ),
                 )
-            db.commit()
+                report_id = cur.lastrowid
+                for f in files:
+                    store_document_file(
+                        db,
+                        file_info=f,
+                        user_id=user.id,
+                        title=f"Justificatif bilan - {self.form_value(form, 'week_label')}",
+                        document_type="justificatif",
+                        weekly_report_id=report_id,
+                        comment="Piece jointe au bilan hebdomadaire",
+                    )
+                managers = db.execute("SELECT * FROM users WHERE role='manager' AND is_active=1").fetchall()
+                for manager in managers:
+                    create_notification(
+                        db,
+                        manager["id"],
+                        "Bilan hebdomadaire envoye",
+                        f"{user.full_name} a envoye le bilan : {self.form_value(form, 'week_label')}.",
+                        None,
+                        "bilan",
+                        None,
+                        report_id,
+                    )
+                db.commit()
+        except ValueError as exc:
+            return self.render_error(400, esc(exc))
         self.redirect(f"/reports/{report_id}")
 
     def page_report_detail(self, report_id: int) -> None:
@@ -1855,6 +2453,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.render_error(404, "Bilan introuvable.")
         if not user.is_manager and report["user_id"] != user.id:
             return self.render_error(403, "Vous ne pouvez pas consulter ce bilan.")
+        report_docs = [d for d in self.visible_documents(user) if d["weekly_report_id"] == report_id]
+        doc_rows = self.documents_table(report_docs, user)
         manager_form = ""
         if user.is_manager:
             manager_form = f"""
@@ -1882,6 +2482,10 @@ class AppHandler(BaseHTTPRequestHandler):
             <dt>Commentaire manager</dt><dd>{esc(report['manager_comment'] or '')}</dd>
           </dl>
         </section>
+        <section class="card">
+          <h2>Pieces justificatives</h2>
+          <div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Projet</th><th>Ajoute par</th><th>Date</th><th>Statut</th><th>Actions</th></tr></thead><tbody>{doc_rows}</tbody></table></div>
+        </section>
         {manager_form}
         """
         self.render("Bilan hebdomadaire", content, user)
@@ -1902,6 +2506,135 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             db.commit()
         self.redirect(f"/reports/{report_id}")
+
+    def page_chat(self) -> None:
+        user = self.require_user()
+        messages = query_all(
+            """
+            SELECT m.*, u.first_name || ' ' || u.last_name AS sender_name
+            FROM chat_messages m JOIN users u ON u.id=m.sender_id
+            ORDER BY m.created_at ASC
+            LIMIT 200
+            """
+        )
+        items = "".join(
+            f"""
+            <article class="notification {'muted' if m['is_deleted'] else ''}">
+              <div><h3>{esc(m['sender_name'])}</h3><p>{esc('Message masque par le manager.' if m['is_deleted'] else m['message'])}</p><small>{esc(m['created_at'])}</small></div>
+              {f'<form method="post" action="/chat/{m["id"]}/delete"><button class="btn ghost" type="submit">Masquer</button></form>' if user.is_manager and not m['is_deleted'] else ''}
+            </article>
+            """
+            for m in messages
+        ) or "<div class='empty'>Aucun message pour le moment.</div>"
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Groupe general</p><h1>Chat equipe</h1><p>Messages courts pour coordonner l'equipe. Les documents importants restent classes dans les projets.</p></div></header>
+        <section class="stack">{items}</section>
+        <section class="card">
+          <form method="post" action="/chat" class="form">
+            <label>Message<textarea name="message" rows="3" required maxlength="1000"></textarea></label>
+            <div class="actions"><button class="btn primary" type="submit">Envoyer</button></div>
+          </form>
+        </section>
+        """
+        self.render("Chat equipe", content, user)
+
+    def action_chat_send(self) -> None:
+        user = self.require_user()
+        form = self.read_form()
+        message = self.form_value(form, "message")
+        if not message:
+            return self.render_error(400, "Le message est obligatoire.")
+        with get_db() as db:
+            db.execute("INSERT INTO chat_messages(sender_id,message,created_at) VALUES(?,?,?)", (user.id, message[:1000], now_iso()))
+            recipients = db.execute("SELECT id FROM users WHERE is_active=1 AND id<>?", (user.id,)).fetchall()
+            for recipient in recipients:
+                create_notification(db, recipient["id"], "Nouveau message chat", f"{user.full_name} a ecrit dans le chat equipe.", None, "chat")
+            db.commit()
+        self.redirect("/chat")
+
+    def action_chat_delete(self, message_id: int) -> None:
+        user = self.require_user()
+        if not user.is_manager:
+            return self.render_error(403, "Acces reserve au manager.")
+        with get_db() as db:
+            db.execute("UPDATE chat_messages SET is_deleted=1, deleted_by=?, deleted_at=? WHERE id=?", (user.id, now_iso(), message_id))
+            db.commit()
+        self.redirect("/chat")
+
+    def page_backups(self) -> None:
+        user = self.require_user()
+        if not user.is_manager:
+            return self.render_error(403, "Acces reserve au manager.")
+        backups = query_all(
+            """
+            SELECT b.*, u.first_name || ' ' || u.last_name AS user_name
+            FROM backups b JOIN users u ON u.id=b.created_by
+            ORDER BY b.created_at DESC
+            """
+        )
+        rows = "".join(
+            f"<tr><td>{esc(b['backup_name'])}</td><td>{esc(b['created_at'])}</td><td>{esc(b['user_name'])}</td><td>{round((b['file_size'] or 0)/1024, 1)} Ko</td><td><a href='/backups/{b['id']}/download'>Telecharger</a></td></tr>"
+            for b in backups
+        ) or "<tr><td colspan='5'>Aucune sauvegarde.</td></tr>"
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Manager</p><h1>Sauvegardes</h1><p>Archive ZIP contenant la base SQLite, les documents televerses et un manifeste.</p></div>
+          <form method="post" action="/backups/new"><button class="btn primary" type="submit">Telecharger une sauvegarde complete</button></form>
+        </header>
+        <section class="card"><div class="table-wrap"><table><thead><tr><th>Nom</th><th>Date</th><th>Lance par</th><th>Taille</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+        """
+        self.render("Sauvegardes", content, user)
+
+    def action_backup_new(self) -> None:
+        user = self.require_user()
+        if not user.is_manager:
+            return self.render_error(403, "Acces reserve au manager.")
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_name = f"orga-pilotage-sauvegarde-{stamp}.zip"
+        target = BACKUP_DIR / backup_name
+        manifest = {
+            "created_at": now_iso(),
+            "created_by": user.full_name,
+            "database": DB_PATH.name,
+            "uploads_dir": "uploads",
+        }
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+            if DB_PATH.exists():
+                z.write(DB_PATH, f"database/{DB_PATH.name}")
+            if UPLOAD_DIR.exists():
+                for f in UPLOAD_DIR.rglob("*"):
+                    if f.is_file():
+                        z.write(f, f"uploads/{f.relative_to(UPLOAD_DIR)}")
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        size = target.stat().st_size
+        rel = str(target.relative_to(DATA_DIR)).replace("\\", "/")
+        with get_db() as db:
+            cur = db.execute(
+                "INSERT INTO backups(backup_name,backup_path,backup_type,file_size,created_by,created_at) VALUES(?,?,?,?,?,?)",
+                (backup_name, rel, "manuelle", size, user.id, now_iso()),
+            )
+            create_notification(db, user.id, "Sauvegarde generee", f"Sauvegarde prete : {backup_name}.", None, "sauvegarde")
+            db.commit()
+            backup_id = cur.lastrowid
+        self.redirect(f"/backups/{backup_id}/download")
+
+    def serve_backup(self, backup_id: int) -> None:
+        user = self.require_user()
+        if not user.is_manager:
+            return self.render_error(403, "Acces reserve au manager.")
+        backup = query_one("SELECT * FROM backups WHERE id=?", (backup_id,))
+        if not backup:
+            return self.render_error(404, "Sauvegarde introuvable.")
+        target = (DATA_DIR / backup["backup_path"]).resolve()
+        if not str(target).startswith(str(DATA_DIR.resolve())) or not target.exists():
+            return self.render_error(404, "Fichier de sauvegarde introuvable.")
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{backup["backup_name"]}"')
+        self.end_headers()
+        self.wfile.write(data)
 
     def page_notifications(self) -> None:
         user = self.require_user()

@@ -1,0 +1,567 @@
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+ORGA Pilotage
+Brief développeur - améliorations fonctionnelles post V1.1
+Gestion documentaire, justificatifs, sauvegarde et chat groupe interne
+Version cible : V1.2 / V1.3 - Document de cadrage réaliste pour développement progressif
+Principe directeur
+Conserver la promesse centrale de ORGA Pilotage : permettre au gérant de savoir qui fait quoi, sur quel projet, avec quel 
+niveau d’avancement, quels blocages et quelles preuves. Les nouvelles fonctions doivent renforcer ce coeur, sans 
+transformer l’application en ERP complexe.
+Résumé exécutif
+La V1.1 étant supposée déployée en mode test, ce document précise les améliorations à ajouter de manière 
+réaliste, progressive et facilement implémentable. Les fonctions demandées sont conservées, mais priorisées pour 
+éviter de surcharger l’application et de réduire l’adoption par l’équipe.
+Module
+Objectif
+Priorité
+Approche recommandée
+Pièces justificatives
+Joindre PDF/JPG/PNG aux 
+bilans, rapports et 
+commentaires
+Haute
+Implémenter en premier, car 
+cela apporte de la preuve au 
+suivi
+Gestion documentaire
+Centraliser les documents 
+liés aux projets et à 
+l’entreprise
+Haute
+Commencer simple : 
+documents par projet + 
+recherche + téléchargement
+Bilans et rapports
+Permettre des retours 
+hebdomadaires avec 
+preuves jointes
+Moyenne haute
+Formulaires courts, rapides à
+remplir
+Chat groupe
+Créer un espace de 
+discussion interne simple
+Moyenne
+Un seul groupe général 
+texte, sans pièces jointes au 
+départ
+Sauvegarde
+Télécharger une copie des 
+données et documents
+Moyenne
+D’abord sauvegarde 
+manuelle, automatique plus 
+tard
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+1. Contexte et objectif de la demande
+ORGA Pilotage dispose déjà d’un socle V1.1 orienté suivi opérationnel : projets, domaines d’activité, tâches 
+prédéfinies, to-do list collaborateur, notifications, commentaires de suivi et bilans hebdomadaires.
+L’objectif des améliorations est d’ajouter une couche de preuve, de mémoire et de communication interne autour 
+de ce socle, sans alourdir le fonctionnement quotidien.
+
+Centraliser les documents importants de l’entreprise et des projets.
+
+Permettre aux collaborateurs de joindre des justificatifs dans leurs bilans, rapports et commentaires.
+
+Offrir au gérant une base de sauvegarde fiable des données et documents.
+
+Ajouter un chat groupe interne simple, inspiré d’un groupe WhatsApp, pour les échanges rapides.
+
+Garder l’application simple, intuitive et adaptée à une petite équipe.
+2. Règles de conception à respecter
+Attention produit
+Les nouvelles fonctions ne doivent pas remplacer WhatsApp, Google Drive ou un ERP complet. Elles doivent seulement 
+centraliser les informations utiles au pilotage des projets et conserver les preuves importantes.
+
+Chaque nouvelle fonction doit être rattachée au coeur de l’application : projet, tâche, bilan, rapport ou 
+collaborateur.
+
+Les formulaires doivent rester courts et rapides à remplir.
+
+Les notifications doivent être limitées aux événements importants pour éviter la saturation.
+
+Les droits d’accès doivent rester simples dans cette version : manager voit tout, collaborateur voit ce qui le 
+concerne.
+
+Le développement doit être organisé par phases testables indépendamment.
+3. Module Gestion documentaire
+Créer un module “Gestion documentaire” permettant de centraliser les documents importants de l’entreprise. Le 
+module doit être simple dans cette première version : ajout, classement, consultation, téléchargement et recherche.
+3.1 Documents concernés
+
+Devis, factures, contrats, bons de commande, preuves de paiement.
+
+Cahiers des charges, rapports, comptes rendus, bilans hebdomadaires.
+
+Photos de livraison, photos terrain, visuels validés, livrables de projet.
+
+Documents fournisseurs, fiches clients, pièces justificatives liées aux tâches.
+3.2 Formats acceptés pour la première version
+
+PDF
+
+JPG / JPEG
+
+PNG
+Les formats Word, Excel, PowerPoint et ZIP sont à reporter dans une version ultérieure afin de limiter les risques 
+de sécurité et la complexité de traitement.
+3.3 Champs à prévoir pour chaque document
+
+Nom du document
+
+Nom original du fichier
+
+Type de document
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+
+Projet associé
+
+Domaine d’activité
+
+Client ou bénéficiaire associé, si applicable
+
+Collaborateur ayant ajouté le document
+
+Tâche associée, si applicable
+
+Bilan associé, si applicable
+
+Rapport associé, si applicable
+
+Statut
+
+Commentaire
+
+Date d’ajout
+
+Chemin de stockage du fichier
+3.4 Statuts documentaires simples
+
+En attente
+
+Validé
+
+Archivé
+
+Remplacé
+3.5 Page à créer : Gestion documentaire
+La page doit afficher une liste filtrable des documents avec les colonnes suivantes :
+
+Nom du document
+
+Type
+
+Projet associé
+
+Collaborateur
+
+Date d’ajout
+
+Statut
+
+Actions : ouvrir, télécharger, valider, archiver
+3.6 Onglet à ajouter dans chaque projet : Documents du projet
+Dans le détail d’un projet, ajouter un onglet permettant de consulter tous les documents liés au projet : devis, 
+contrat, facture, rapport, justificatif, photo, preuve de livraison, etc.
+4. Pièces justificatives dans bilans, rapports et commentaires
+Permettre aux collaborateurs de téléverser des fichiers justificatifs PDF/JPG/PNG dans les formulaires clés de 
+l’application. Cette fonction est prioritaire car elle transforme les déclarations en éléments vérifiables.
+4.1 Emplacements où ajouter les justificatifs
+
+Commentaires de suivi de tâche : justificatif lié à une action ou un blocage.
+
+Bilans hebdomadaires : justificatifs des tâches réalisées, preuves de livraison, devis, captures ou photos.
+
+Rapports ou comptes rendus : photos terrain, fiches de contrôle, documents clients.
+
+Détail projet : ajout direct d’un document important par le manager ou un utilisateur autorisé.
+4.2 Fonctionnement attendu côté collaborateur
+
+Voir un champ “Ajouter une pièce justificative”.
+
+Téléverser un ou plusieurs fichiers autorisés.
+
+Voir les fichiers sélectionnés avant validation.
+
+Supprimer un fichier avant envoi.
+
+Envoyer le commentaire, bilan ou rapport avec ses pièces jointes.
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+4.3 Fonctionnement attendu côté manager
+
+Ouvrir les pièces jointes depuis le bilan, le commentaire, le rapport ou le projet.
+
+Télécharger les fichiers.
+
+Identifier le collaborateur qui a ajouté le document.
+
+Voir le projet, la tâche ou le bilan auquel le fichier est rattaché.
+
+Valider ou archiver un document si nécessaire.
+4.4 Classement automatique
+Tout fichier téléversé dans un commentaire, un bilan ou un rapport doit automatiquement apparaître dans le 
+module Gestion documentaire, afin d’éviter la double saisie.
+5. Bilans hebdomadaires et rapports avec justificatifs
+Les bilans et rapports doivent rester très simples. L’objectif est de favoriser l’usage régulier, pas de créer une 
+charge administrative lourde.
+5.1 Bilan hebdomadaire - formulaire recommandé
+
+Semaine concernée.
+
+Projets suivis.
+
+Ce qui a été réalisé cette semaine.
+
+Ce qui reste à faire.
+
+Blocages ou difficultés.
+
+Besoins d’aide ou de validation.
+
+Priorités de la semaine prochaine.
+
+Pièces justificatives.
+
+Commentaire général optionnel.
+5.2 Onglet manager : Bilans
+
+Voir les bilans par collaborateur, semaine, date d’envoi et statut.
+
+Ouvrir le détail d’un bilan.
+
+Télécharger les justificatifs joints.
+
+Marquer un bilan comme lu.
+
+Demander un complément d’information.
+5.3 Rapports / comptes rendus
+Prévoir une fonction simple de rapport, utilisée pour les visites terrain, réunions, livraisons, contrôles ou retours 
+clients. Le rapport doit pouvoir être rattaché à un projet et recevoir des pièces jointes.
+
+Titre du rapport
+
+Projet associé
+
+Contenu / compte rendu
+
+Statut : brouillon, envoyé, lu
+
+Pièces jointes
+
+Date d’envoi
+6. Base de sauvegarde et export complet
+Ajouter une fonction de sauvegarde permettant au gérant de récupérer une copie des données importantes. Pour 
+rester réaliste, commencer par une sauvegarde manuelle ; la sauvegarde automatique sera une amélioration 
+ultérieure.
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+6.1 Sauvegarde manuelle prioritaire
+Créer un bouton visible uniquement par le manager : “Télécharger une sauvegarde complète”.
+
+Base de données de l’application.
+
+Documents téléversés.
+
+Pièces justificatives.
+
+Bilans et rapports.
+
+Fichier d’index ou manifeste listant le contenu de la sauvegarde.
+6.2 Historique des sauvegardes
+Ajouter une section simple affichant :
+
+Date de sauvegarde
+
+Utilisateur ayant lancé la sauvegarde
+
+Taille du fichier
+
+Lien de téléchargement
+6.3 À reporter plus tard
+
+Sauvegarde automatique planifiée
+
+Restauration en un clic
+
+Archivage avancé
+
+Synchronisation vers un stockage externe
+7. Chat groupe interne simple
+Ajouter un espace de discussion commun à toute l’équipe, inspiré d’un groupe WhatsApp, mais volontairement 
+limité pour ne pas transformer ORGA Pilotage en messagerie complexe.
+7.1 Fonctionnalités du chat V1
+
+Un seul groupe général : “Chat équipe”.
+
+Messages texte simples.
+
+Affichage du nom de l’expéditeur.
+
+Affichage de la date et de l’heure.
+
+Historique des messages.
+
+Notification interne en cas de nouveau message.
+
+Suppression ou masquage d’un message par le manager.
+7.2 Fonctions à ne pas intégrer tout de suite
+
+Messages vocaux
+
+Pièces jointes dans le chat
+
+Groupes multiples
+
+Chat privé
+
+Réactions emoji
+
+Mentions @nom
+Justification
+Le chat doit aider l’équipe à échanger rapidement, mais les documents importants doivent passer par les projets, bilans ou 
+rapports pour rester classés et retrouvables.
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+8. Droits d’accès et sécurité minimale
+
+Manager / Gérant : voit tous les documents, bilans, rapports, sauvegardes et messages.
+
+Collaborateur : voit les documents liés à ses projets, ses tâches et ses propres bilans/rapports.
+
+RAF : peut accéder aux documents financiers liés à ses projets ou autorisés par le manager.
+
+Chef de projet : voit les documents opérationnels liés à ses projets.
+
+Assistante : peut ajouter et classer des documents selon autorisation.
+8.1 Sécurité fichiers
+
+Taille maximale recommandée : 5 Mo par fichier au démarrage.
+
+Formats autorisés : PDF, JPG, JPEG, PNG.
+
+Renommage automatique des fichiers pour éviter les doublons.
+
+Vérification de l’extension et du type MIME.
+
+Blocage des fichiers exécutables ou suspects.
+
+Accès aux fichiers uniquement après connexion utilisateur.
+
+Journalisation : qui a téléversé quoi, quand et sur quel projet.
+9. Évolutions techniques et base de données
+Le développeur peut adapter les noms selon l’architecture existante. Les tables ci-dessous décrivent le besoin 
+fonctionnel minimal.
+9.1 Table documents
+Champ
+Description
+id
+Identifiant
+title
+Nom visible du document
+original_name
+Nom original
+stored_name
+Nom stocké sécurisé
+file_path
+Chemin fichier
+file_type
+PDF/JPG/PNG
+file_size
+Taille
+document_type
+Devis, facture, rapport, justificatif...
+status
+En attente, validé, archivé, remplacé
+project_id
+Projet lié
+task_id
+Tâche liée si applicable
+weekly_report_id
+Bilan lié si applicable
+report_id
+Rapport lié si applicable
+uploaded_by
+Utilisateur ayant ajouté
+created_at
+Date ajout
+9.2 Table reports
+Champ
+Description
+id
+Identifiant
+project_id
+Projet associé
+user_id
+Auteur
+title
+Titre
+content
+Compte rendu
+status
+Brouillon, envoyé, lu
+submitted_at
+Date envoi
+created_at / updated_at
+Dates système
+9.3 Table backups
+Champ
+Description
+id
+Identifiant
+backup_name
+Nom sauvegarde
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+backup_path
+Chemin fichier ZIP
+backup_type
+Manuelle / automatique
+file_size
+Taille
+created_by
+Utilisateur
+created_at
+Date
+9.4 Table chat_messages
+Champ
+Description
+id
+Identifiant
+sender_id
+Auteur
+message
+Texte du message
+created_at
+Date et heure
+is_deleted
+Message masqué/supprimé
+deleted_by
+Manager ayant supprimé
+deleted_at
+Date suppression
+10. Notifications à prévoir
+Pour éviter de saturer les utilisateurs, les emails doivent rester limités. Les notifications internes sont préférées 
+pour les événements fréquents.
+Événement
+Notification interne
+Email
+Destinataire
+Nouveau document 
+important ajouté
+Oui
+Non par défaut
+Manager
+Bilan hebdomadaire envoyé
+Oui
+Optionnel
+Manager
+Rapport envoyé
+Oui
+Optionnel
+Manager
+Nouveau message chat
+Oui
+Non
+Tous sauf auteur
+Sauvegarde générée
+Oui
+Non
+Manager
+11. Feuille de route recommandée
+Les fonctions doivent être développées et testées par lots. Chaque phase doit pouvoir être livrée indépendamment.
+Phase
+Contenu
+Critère de validation
+Phase 1 - Justificatifs
+Téléversement PDF/JPG/PNG dans 
+commentaires, bilans et rapports. 
+Classement automatique dans 
+Documents du projet.
+Un collaborateur joint un fichier ; le 
+manager peut le consulter et le 
+télécharger.
+Phase 2 - Gestion documentaire simple
+Page Gestion documentaire, recherche 
+simple, filtre par 
+projet/type/collaborateur, statuts 
+basiques.
+Le manager retrouve un document sans
+passer par le projet.
+Phase 3 - Bilans/Rapports renforcés
+Bilan hebdomadaire avec pièces 
+jointes, création de rapports, onglet 
+Bilans manager.
+Le manager consulte un bilan/rapport 
+avec justificatifs.
+Phase 4 - Chat équipe
+Un chat groupe texte, notification 
+interne, historique, suppression 
+manager.
+Tous les utilisateurs peuvent échanger 
+dans le groupe général.
+Phase 5 - Sauvegarde
+Sauvegarde manuelle complète en ZIP 
++ historique.
+Le manager télécharge une archive 
+contenant base + fichiers.
+12. Critères d’acceptation globaux
+
+Les nouvelles fonctions ne cassent pas les fonctions V1.1 déjà déployées.
+
+Un utilisateur non connecté ne peut pas ouvrir un document téléversé.
+
+Un collaborateur ne voit pas les documents d’un projet auquel il n’est pas associé.
+
+Les fichiers non autorisés sont refusés avec un message clair.
+
+--- PAGE ---
+
+ORGA Pilotage - Brief développeur améliorations fonctionnelles - Document de travail
+
+Le manager peut retrouver les documents par projet, type, date ou collaborateur.
+
+Le chat reste simple et fluide sur mobile.
+
+La sauvegarde manuelle génère une archive exploitable.
+
+Les formulaires restent courts et compréhensibles par des non-techniciens.
+13. Hors périmètre pour cette amélioration
+
+ERP complet, comptabilité complète, paie ou SIRH avancé.
+
+Gestion avancée des versions documentaires.
+
+Restauration automatique en un clic.
+
+Sauvegarde planifiée avec cron ou services externes, sauf si l’environnement le permet facilement.
+
+Chat privé, messages vocaux, pièces jointes dans le chat.
+
+Application mobile native.
+
+IA ou automatisation complexe.
+14. Formulation courte à transmettre au développeur
+Demande : 
+Ajouter à ORGA Pilotage une couche de gestion documentaire, de justificatifs, de rapports/bilans, de 
+chat groupe et de sauvegarde, en conservant l’application simple et centrée sur le suivi des projets. Les 
+collaborateurs doivent pouvoir joindre des fichiers PDF/JPG/PNG à leurs commentaires, bilans et rapports. Ces 
+fichiers doivent être automatiquement rattachés au projet et visibles dans une page Gestion documentaire. Le 
+manager doit pouvoir consulter, télécharger, valider ou archiver les documents, voir les bilans avec justificatifs, 
+échanger avec l’équipe dans un chat groupe simple, et télécharger une sauvegarde complète des données et 
+fichiers. Le développement doit être progressif, en commençant par les justificatifs et la gestion documentaire 
+simple.
