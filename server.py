@@ -712,6 +712,35 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.end_headers()
 
+    def orientation_hint(self, user: Optional[CurrentUser]) -> str:
+        if not user:
+            return ""
+        path = self.parsed_path.path
+        label = "Guide rapide"
+        message = "Suivez les actions principales de la page, puis revenez au tableau de bord pour controler l'avancement."
+        hints = [
+            ("/dashboard", "Vue d'ensemble", "Commencez ici pour lire les priorites, les blocages et les elements recents."),
+            ("/projects/new", "Creation de projet", "Choisissez un domaine : les taches utiles seront generees automatiquement."),
+            ("/projects", "Portefeuille projets", "Ouvrez un projet pour voir son domaine, son equipe et ses taches."),
+            ("/tasks/new", "Tache manuelle", "Ajoutez ici une tache ponctuelle qui n'existe pas dans les modeles."),
+            ("/tasks", "To-do list", "Mettez vos taches a jour et ajoutez un suivi si besoin."),
+            ("/reports/new", "Bilan hebdomadaire", "Resumez la semaine : realisations, blocages et priorites suivantes."),
+            ("/reports", "Bilans", "Consultez ou envoyez les bilans hebdomadaires selon votre role."),
+            ("/notifications", "Notifications", "Retrouvez les assignations, demandes de suivi et bilans envoyes."),
+            ("/users", "Equipe", "Ajoutez ou verifiez les comptes actifs de l'application."),
+        ]
+        for prefix, candidate_label, candidate_message in hints:
+            if path == prefix or path.startswith(prefix + "/"):
+                label = candidate_label
+                message = candidate_message
+                break
+        return f"""
+        <aside class="orientation-bubble" aria-label="Aide contextuelle">
+          <span class="orientation-dot">?</span>
+          <div><strong>{esc(label)}</strong><span>{esc(message)}</span></div>
+        </aside>
+        """
+
     def render(self, title: str, content: str, user: Optional[CurrentUser] = None, notice: str = "") -> None:
         unread = 0
         if user:
@@ -747,6 +776,7 @@ class AppHandler(BaseHTTPRequestHandler):
           {nav}
           <main class="page">
             {f'<div class="notice">{esc(notice)}</div>' if notice else ''}
+            {self.orientation_hint(user)}
             {content}
           </main>
         </body>
