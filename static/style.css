@@ -100,6 +100,68 @@ a:hover { color: var(--accent-2); text-decoration: none; }
 .brand-large h1 { margin: 0; color: var(--heading); }
 .brand-large p { margin: .1rem 0 0; color: var(--muted); }
 
+.sidebar-profile {
+  display: flex;
+  align-items: center;
+  gap: .72rem;
+  margin-top: .85rem;
+  padding: .72rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .045);
+  color: var(--heading);
+}
+
+.sidebar-profile:hover {
+  background: rgba(255, 91, 26, .12);
+  color: #fff;
+}
+
+.sidebar-profile strong,
+.sidebar-profile small {
+  display: block;
+}
+
+.sidebar-profile small {
+  margin-top: .08rem;
+  color: var(--muted);
+  font-size: .76rem;
+  line-height: 1.2;
+}
+
+.profile-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-weight: 900;
+  box-shadow: var(--glow);
+}
+
+.profile-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-avatar.large {
+  width: 96px;
+  height: 96px;
+  margin-bottom: 1rem;
+  font-size: 1.8rem;
+}
+
+.profile-card {
+  display: grid;
+  justify-items: start;
+  align-content: start;
+}
+
 .nav-links {
   display: grid;
   align-content: start;

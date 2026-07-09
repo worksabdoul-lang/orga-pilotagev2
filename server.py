@@ -165,6 +165,7 @@ class CurrentUser:
     poste: str
     email: str
     role: str
+    profile_photo: str = ""
 
     @property
     def full_name(self) -> str:
@@ -272,12 +273,79 @@ def seed_domains_and_templates(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def seed_finished_demo_projects(db: sqlite3.Connection) -> None:
+    existing = db.execute("SELECT COUNT(*) AS c FROM projects WHERE name LIKE 'Demo termine - %'").fetchone()["c"]
+    if existing:
+        return
+    manager = db.execute("SELECT * FROM users WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    if not manager:
+        return
+    collaborators = db.execute("SELECT * FROM users WHERE role='collaborateur' AND is_active=1 ORDER BY id").fetchall()
+    domains = db.execute("SELECT * FROM domains ORDER BY id").fetchall()
+    if not collaborators or not domains:
+        return
+    samples = [
+        ("Demo termine - Seminaire client Abidjan", "Organisation d'un seminaire client finalise avec installation et rapport de cloture.", "EDISSOU Groupe", "evenementiel", 42),
+        ("Demo termine - Kits cadeaux partenaires", "Production et livraison de gadgets personnalises pour partenaires strategiques.", "Partenaires ORGA", "cadeaux_gadgets", 30),
+        ("Demo termine - Mission conseil PME", "Diagnostic operationnel et restitution des recommandations au client.", "PME Horizon", "conseil", 18),
+    ]
+    domain_by_code = {d["code"]: d for d in domains}
+    today = dt.date.today()
+    for idx, (name, description, client, domain_code, days_ago) in enumerate(samples):
+        domain = domain_by_code.get(domain_code) or domains[0]
+        start = today - dt.timedelta(days=days_ago + 12)
+        due = today - dt.timedelta(days=days_ago)
+        responsible = collaborators[idx % len(collaborators)]
+        cur = db.execute(
+            """
+            INSERT INTO projects(name,domain_id,description,objective,client,start_date,due_date,priority,responsible_user_id,status,observations,created_by,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                name,
+                domain["id"],
+                description,
+                "Projet fictif termine pour alimenter le tableau de bord.",
+                client,
+                start.isoformat(),
+                due.isoformat(),
+                "normale",
+                responsible["id"],
+                "termine",
+                "Donnees de demonstration.",
+                manager["id"],
+                f"{start.isoformat()} 09:00:00",
+                f"{due.isoformat()} 17:30:00",
+            ),
+        )
+        project_id = cur.lastrowid
+        members = collaborators[: min(4, len(collaborators))]
+        for member in members:
+            db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,created_at) VALUES(?,?,?)", (project_id, member["id"], now_iso()))
+        generated = generate_project_tasks(db, project_id, domain["id"], members, manager["id"], due.isoformat())
+        for task in generated:
+            db.execute(
+                "UPDATE project_tasks SET status='valide', progress_percent=100, is_completed=1, updated_at=? WHERE id=?",
+                (f"{due.isoformat()} 17:30:00", task["id"]),
+            )
+            db.execute(
+                "INSERT INTO task_comments(task_id,user_id,comment,blocker,next_action,created_at) VALUES(?,?,?,?,?,?)",
+                (task["id"], task["assigned_user_id"], "Tache terminee et validee dans les donnees de demonstration.", "", "Aucune action restante.", f"{due.isoformat()} 16:30:00"),
+            )
+    db.commit()
+
+
 def add_days(date_value: str, days: int) -> str:
     try:
         base = dt.date.fromisoformat(date_value) if date_value else dt.date.today()
     except ValueError:
         base = dt.date.today()
     return (base + dt.timedelta(days=days)).isoformat()
+
+
+def initials(first_name: str, last_name: str) -> str:
+    value = f"{(first_name or 'U')[:1]}{(last_name or '')[:1]}".upper()
+    return value or "U"
 
 
 def init_db() -> None:
@@ -505,6 +573,7 @@ def init_db() -> None:
         ensure_column(db, "projects", "domain_id", "INTEGER")
         ensure_column(db, "notifications", "task_id", "INTEGER")
         ensure_column(db, "notifications", "report_id", "INTEGER")
+        ensure_column(db, "users", "profile_photo", "TEXT")
         seed_domains_and_templates(db)
         count = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         if count == 0:
@@ -525,6 +594,7 @@ def init_db() -> None:
                     (first, last, poste, email, hash_password(password), role),
                 )
             db.commit()
+        seed_finished_demo_projects(db)
 
 
 def query_one(sql: str, params: Tuple[Any, ...] = ()) -> Optional[sqlite3.Row]:
@@ -854,7 +924,7 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         if not row:
             return None
-        return CurrentUser(row["id"], row["first_name"], row["last_name"], row["poste"], row["email"], row["role"])
+        return CurrentUser(row["id"], row["first_name"], row["last_name"], row["poste"], row["email"], row["role"], row["profile_photo"] if "profile_photo" in row.keys() else "")
 
     def require_user(self) -> CurrentUser:
         user = self.current_user()
@@ -961,9 +1031,14 @@ class AppHandler(BaseHTTPRequestHandler):
             unread = row["c"] if row else 0
         nav = ""
         if user:
+            avatar = f"<img src='{esc(user.profile_photo)}' alt='Photo profil'>" if user.profile_photo else esc(initials(user.first_name, user.last_name))
             nav = f"""
             <nav class="topbar">
               <a class="brand" href="/dashboard"><span class="brand-mark">O</span><span>{APP_NAME}</span></a>
+              <a class="sidebar-profile" href="/profile">
+                <span class="profile-avatar">{avatar}</span>
+                <span><strong>{esc(user.full_name)}</strong><small>{esc(user.poste)}</small></span>
+              </a>
               <div class="nav-links">
                 <a href="/dashboard">Tableau de bord</a>
                 <a href="/projects">Projets</a>
@@ -1024,6 +1099,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.page_login()
         if path == "/dashboard":
             return self.page_dashboard()
+        if path == "/profile":
+            return self.page_profile()
         if path == "/projects":
             return self.page_projects()
         if path == "/projects/new":
@@ -1084,6 +1161,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.action_login()
         if path == "/logout":
             return self.action_logout()
+        if path == "/profile/password":
+            return self.action_profile_password()
         if path == "/projects/new":
             return self.action_project_new()
         if path == "/users":
@@ -1200,6 +1279,53 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Set-Cookie", cookie.output(header="").strip())
         self.end_headers()
 
+    def page_profile(self, message: str = "") -> None:
+        user = self.require_user()
+        avatar = f"<img src='{esc(user.profile_photo)}' alt='Photo profil'>" if user.profile_photo else esc(initials(user.first_name, user.last_name))
+        content = f"""
+        <header class="hero small"><div><p class="eyebrow">Espace profil</p><h1>{esc(user.full_name)}</h1><p>Consultez vos informations et modifiez votre mot de passe.</p></div></header>
+        {f'<div class="notice">{esc(message)}</div>' if message else ''}
+        <div class="grid two">
+          <section class="card profile-card">
+            <span class="profile-avatar large">{avatar}</span>
+            <h2>{esc(user.full_name)}</h2>
+            <dl class="details">
+              <dt>Poste</dt><dd>{esc(user.poste)}</dd>
+              <dt>Email</dt><dd>{esc(user.email)}</dd>
+              <dt>Role</dt><dd><span class="pill {status_class(user.role)}">{esc(dict(ROLES).get(user.role, user.role))}</span></dd>
+            </dl>
+          </section>
+          <section class="card">
+            <h2>Modifier le mot de passe</h2>
+            <form method="post" action="/profile/password" class="form">
+              <label>Mot de passe actuel<input type="password" name="current_password" required></label>
+              <label>Nouveau mot de passe<input type="password" name="new_password" required minlength="6"></label>
+              <label>Confirmer le nouveau mot de passe<input type="password" name="confirm_password" required minlength="6"></label>
+              <button class="btn primary" type="submit">Mettre a jour</button>
+            </form>
+          </section>
+        </div>
+        """
+        self.render("Profil", content, user)
+
+    def action_profile_password(self) -> None:
+        user = self.require_user()
+        form = self.read_form()
+        current = self.form_value(form, "current_password")
+        new_password = self.form_value(form, "new_password")
+        confirm = self.form_value(form, "confirm_password")
+        row = query_one("SELECT * FROM users WHERE id=?", (user.id,))
+        if not row or not verify_password(current, row["password_hash"]):
+            return self.page_profile("Mot de passe actuel incorrect.")
+        if len(new_password) < 6:
+            return self.page_profile("Le nouveau mot de passe doit contenir au moins 6 caracteres.")
+        if new_password != confirm:
+            return self.page_profile("La confirmation ne correspond pas au nouveau mot de passe.")
+        with get_db() as db:
+            db.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new_password), user.id))
+            db.commit()
+        self.page_profile("Mot de passe mis a jour.")
+
     def page_dashboard(self) -> None:
         user = self.require_user()
         if user.is_manager:
@@ -1267,7 +1393,7 @@ class AppHandler(BaseHTTPRequestHandler):
         content = f"""
         <header class="hero">
           <div>
-            <p class="eyebrow">Vue manager</p>
+            <p class="eyebrow">Vue manager - {esc(user.full_name)}</p>
             <h1>Tableau de bord général</h1>
             <p>Suivez l'état global des projets, les apports renseignés et les blocages.</p>
           </div>
@@ -1331,7 +1457,7 @@ class AppHandler(BaseHTTPRequestHandler):
         content = f"""
         <header class="hero">
           <div>
-            <p class="eyebrow">Espace collaborateur</p>
+            <p class="eyebrow">Espace collaborateur - {esc(user.full_name)}</p>
             <h1>Bonjour {esc(user.first_name)}</h1>
             <p>Renseignez vos apports et mettez à jour votre avancement sur les projets assignés.</p>
           </div>
