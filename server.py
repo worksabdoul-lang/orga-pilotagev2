@@ -43,6 +43,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 BACKUP_DIR = DATA_DIR / "backups"
 SESSION_COOKIE = "orga_session"
 PBKDF2_ITERATIONS = 180_000
+SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024
 ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 ALLOWED_UPLOAD_MIME_PREFIXES = ("application/pdf", "image/jpeg", "image/png")
@@ -178,6 +179,10 @@ class CurrentUser:
 
 def now_iso() -> str:
     return dt.datetime.now().replace(microsecond=0).isoformat(sep=" ")
+
+
+def session_expiry_iso() -> str:
+    return (dt.datetime.now() + dt.timedelta(hours=SESSION_HOURS)).replace(microsecond=0).isoformat(sep=" ")
 
 
 def today_iso() -> str:
@@ -574,6 +579,12 @@ def init_db() -> None:
         ensure_column(db, "notifications", "task_id", "INTEGER")
         ensure_column(db, "notifications", "report_id", "INTEGER")
         ensure_column(db, "users", "profile_photo", "TEXT")
+        ensure_column(db, "sessions", "csrf_token", "TEXT")
+        ensure_column(db, "sessions", "expires_at", "TEXT")
+        for session in db.execute("SELECT token FROM sessions WHERE csrf_token IS NULL OR csrf_token=''").fetchall():
+            db.execute("UPDATE sessions SET csrf_token=? WHERE token=?", (secrets.token_urlsafe(32), session["token"]))
+        db.execute("UPDATE sessions SET expires_at=? WHERE expires_at IS NULL OR expires_at=''", (session_expiry_iso(),))
+        db.commit()
         seed_domains_and_templates(db)
         count = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         if count == 0:
@@ -594,7 +605,8 @@ def init_db() -> None:
                     (first, last, poste, email, hash_password(password), role),
                 )
             db.commit()
-        seed_finished_demo_projects(db)
+        if os.environ.get("ENABLE_DEMO_DATA", "").lower() in {"true", "1", "yes", "on"}:
+            seed_finished_demo_projects(db)
 
 
 def query_one(sql: str, params: Tuple[Any, ...] = ()) -> Optional[sqlite3.Row]:
@@ -867,8 +879,13 @@ def store_document_file(
 
 def create_session(user_id: int) -> str:
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
     with get_db() as db:
-        db.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)", (token, user_id, now_iso()))
+        db.execute("DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?", (now_iso(),))
+        db.execute(
+            "INSERT INTO sessions(token,user_id,created_at,csrf_token,expires_at) VALUES(?,?,?,?,?)",
+            (token, user_id, now_iso(), csrf_token, session_expiry_iso()),
+        )
         db.commit()
     return token
 
@@ -892,13 +909,15 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             self.route_get()
         except Exception as exc:
-            self.render_error(500, f"Erreur interne : {esc(exc)}")
+            print(f"[{now_iso()}] ERREUR GET {self.path}: {exc}")
+            self.render_error(500, "Erreur interne. Merci de reessayer ou de contacter l'administrateur.")
 
     def do_POST(self) -> None:
         try:
             self.route_post()
         except Exception as exc:
-            self.render_error(500, f"Erreur interne : {esc(exc)}")
+            print(f"[{now_iso()}] ERREUR POST {self.path}: {exc}")
+            self.render_error(500, "Erreur interne. Merci de reessayer ou de contacter l'administrateur.")
 
     @property
     def parsed_path(self):
@@ -922,6 +941,10 @@ class AppHandler(BaseHTTPRequestHandler):
             """,
             (token,),
         )
+        session = query_one("SELECT * FROM sessions WHERE token=?", (token,))
+        if session and session["expires_at"] and session["expires_at"] < now_iso():
+            destroy_session(token)
+            return None
         if not row:
             return None
         return CurrentUser(row["id"], row["first_name"], row["last_name"], row["poste"], row["email"], row["role"], row["profile_photo"] if "profile_photo" in row.keys() else "")
@@ -933,16 +956,22 @@ class AppHandler(BaseHTTPRequestHandler):
             raise RuntimeError("AUTH_REDIRECT")
         return user
 
-    def read_form(self) -> Dict[str, List[str]]:
+    def read_body(self) -> bytes:
+        if hasattr(self, "_cached_body"):
+            return self._cached_body
         length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        self._cached_body = self.rfile.read(length) if length else b""
+        return self._cached_body
+
+    def read_form(self) -> Dict[str, List[str]]:
+        raw = self.read_body().decode("utf-8") if self.read_body() else ""
         return parse_qs(raw, keep_blank_values=True)
 
     def read_multipart_form(self) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
         length = int(self.headers.get("Content-Length", "0"))
         if length > (MAX_UPLOAD_SIZE * 8):
             raise ValueError("Envoi trop volumineux.")
-        body = self.rfile.read(length) if length else b""
+        body = self.read_body()
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
             return parse_qs(body.decode("utf-8"), keep_blank_values=True), []
@@ -968,6 +997,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 fields.setdefault(name, []).append(payload.decode(part.get_content_charset() or "utf-8", errors="replace").strip())
         return fields, files
 
+    def session_csrf_token(self) -> str:
+        token = self.get_cookie(SESSION_COOKIE)
+        if not token:
+            return ""
+        row = query_one("SELECT csrf_token FROM sessions WHERE token=?", (token,))
+        return row["csrf_token"] if row and row["csrf_token"] else ""
+
+    def verify_csrf(self) -> bool:
+        expected = self.session_csrf_token()
+        if not expected:
+            return False
+        content_type = self.headers.get("Content-Type", "")
+        try:
+            form, _files = self.read_multipart_form() if "multipart/form-data" in content_type else (self.read_form(), [])
+        except Exception:
+            return False
+        submitted = self.form_value(form, "_csrf")
+        return bool(submitted) and hmac.compare_digest(submitted, expected)
+
     def form_value(self, form: Dict[str, List[str]], key: str, default: str = "") -> str:
         return form.get(key, [default])[0].strip()
 
@@ -990,6 +1038,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def should_use_secure_cookie(self) -> bool:
+        if os.environ.get("COOKIE_SECURE", "").lower() in {"true", "1", "yes", "on"}:
+            return True
+        if os.environ.get("APP_URL", "").lower().startswith("https://"):
+            return True
+        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
 
     def orientation_hint(self, user: Optional[CurrentUser]) -> str:
         if not user:
@@ -1074,6 +1129,14 @@ class AppHandler(BaseHTTPRequestHandler):
         </body>
         </html>
         """
+        if user:
+            csrf = esc(self.session_csrf_token())
+            html_doc = re.sub(
+                r'(<form\b(?=[^>]*method="post")[^>]*>)',
+                rf'\1<input type="hidden" name="_csrf" value="{csrf}">',
+                html_doc,
+                flags=re.IGNORECASE,
+            )
         self.send_html(html_doc)
 
     def render_error(self, status: int, message: str) -> None:
@@ -1159,6 +1222,8 @@ class AppHandler(BaseHTTPRequestHandler):
         path = self.parsed_path.path
         if path == "/login":
             return self.action_login()
+        if not self.verify_csrf():
+            return self.render_error(403, "Session expiree ou formulaire invalide. Merci de recharger la page.")
         if path == "/logout":
             return self.action_logout()
         if path == "/profile/password":
@@ -1227,23 +1292,28 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def page_login(self, error: str = "") -> None:
-        content = f"""
-        <section class="login-shell">
-          <div class="login-card">
-            <div class="brand-large"><span class="brand-mark">O</span><div><h1>{APP_NAME}</h1><p>Suivi interne des projets et apports d'équipe</p></div></div>
-            {f'<div class="alert danger">{esc(error)}</div>' if error else ''}
-            <form method="post" action="/login" class="form">
-              <label>Email</label>
-              <input type="email" name="email" required placeholder="manager@orga.local">
-              <label>Mot de passe</label>
-              <input type="password" name="password" required placeholder="••••••••">
-              <button class="btn primary full" type="submit">Se connecter</button>
-            </form>
+        demo_box = ""
+        if os.environ.get("SHOW_DEMO_CREDENTIALS", "").lower() in {"true", "1", "yes", "on"}:
+            demo_box = """
             <div class="demo-box">
               <strong>Comptes de test</strong><br>
               Manager : manager@orga.local / admin123<br>
               Collaborateurs : commercial@orga.local, chef.projet@orga.local, technique@orga.local, raf@orga.local, assistante@orga.local / test123
             </div>
+            """
+        content = f"""
+        <section class="login-shell">
+          <div class="login-card">
+            <div class="brand-large"><span class="brand-mark">O</span><div><h1>{APP_NAME}</h1><p>Suivi interne des projets et apports d'equipe</p></div></div>
+            {f'<div class="alert danger">{esc(error)}</div>' if error else ''}
+            <form method="post" action="/login" class="form">
+              <label>Email</label>
+              <input type="email" name="email" required placeholder="votre.email@entreprise.com">
+              <label>Mot de passe</label>
+              <input type="password" name="password" required placeholder="Mot de passe">
+              <button class="btn primary full" type="submit">Se connecter</button>
+            </form>
+            {demo_box}
           </div>
         </section>
         """
@@ -1262,6 +1332,8 @@ class AppHandler(BaseHTTPRequestHandler):
         cookie[SESSION_COOKIE]["httponly"] = True
         cookie[SESSION_COOKIE]["path"] = "/"
         cookie[SESSION_COOKIE]["samesite"] = "Lax"
+        if self.should_use_secure_cookie():
+            cookie[SESSION_COOKIE]["secure"] = True
         self.send_response(303)
         self.send_header("Location", "/dashboard")
         self.send_header("Set-Cookie", cookie.output(header="").strip())
@@ -1274,6 +1346,8 @@ class AppHandler(BaseHTTPRequestHandler):
         cookie[SESSION_COOKIE] = ""
         cookie[SESSION_COOKIE]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
         cookie[SESSION_COOKIE]["path"] = "/"
+        if self.should_use_secure_cookie():
+            cookie[SESSION_COOKIE]["secure"] = True
         self.send_response(303)
         self.send_header("Location", "/login")
         self.send_header("Set-Cookie", cookie.output(header="").strip())
@@ -2718,20 +2792,33 @@ class AppHandler(BaseHTTPRequestHandler):
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_name = f"orga-pilotage-sauvegarde-{stamp}.zip"
         target = BACKUP_DIR / backup_name
+        db_snapshot = BACKUP_DIR / f"snapshot-{stamp}.sqlite3"
         manifest = {
             "created_at": now_iso(),
             "created_by": user.full_name,
             "database": DB_PATH.name,
             "uploads_dir": "uploads",
         }
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
-            if DB_PATH.exists():
-                z.write(DB_PATH, f"database/{DB_PATH.name}")
-            if UPLOAD_DIR.exists():
-                for f in UPLOAD_DIR.rglob("*"):
-                    if f.is_file():
-                        z.write(f, f"uploads/{f.relative_to(UPLOAD_DIR)}")
-            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        if DB_PATH.exists():
+            source = sqlite3.connect(DB_PATH)
+            dest = sqlite3.connect(db_snapshot)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+                source.close()
+        try:
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+                if db_snapshot.exists():
+                    z.write(db_snapshot, f"database/{DB_PATH.name}")
+                if UPLOAD_DIR.exists():
+                    for f in UPLOAD_DIR.rglob("*"):
+                        if f.is_file():
+                            z.write(f, f"uploads/{f.relative_to(UPLOAD_DIR)}")
+                z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        finally:
+            if db_snapshot.exists():
+                db_snapshot.unlink()
         size = target.stat().st_size
         rel = str(target.relative_to(DATA_DIR)).replace("\\", "/")
         with get_db() as db:
